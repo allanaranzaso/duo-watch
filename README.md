@@ -59,6 +59,7 @@ GitHub Actions (cron every 2h)  →  duo_watch.py loops ~5h45m
 | **Secret** | `NTFY_TOPIC` | your topic, e.g. `duo-allan-7f3k9q` |
 | **Variable** | `DUO_STORAGE` | `256GB`, `512GB`, `1TB` or `2TB` (comma-separate to watch several) |
 | Variable (optional) | `DUO_COLORS` | `Star White` or `Night Sky` (default: both) |
+| Variable (optional) | `DUO_BAG_COLOR` | `Star White` or `Night Sky`. Alerts for this colour open your Apple bag instead of the product page. Must be one of the colours you're watching. |
 | Variable (optional) | `WATCH_STORES` | e.g. `R460,R280` to narrow the stores (default: all 5) |
 | Variable (optional) | `POLL_SECONDS` | default `75` (minimum 30) |
 
@@ -84,6 +85,9 @@ Actions tab → the workflow → **⋯ → Disable workflow**.
   double-check, pick your config on apple.com/ca. The `MK2…VC/A` code shows
   up in the URL or in the "Check availability" request in your browser's
   dev tools. Edit `PARTS` in `duo_watch.py` if one is off.
+- **`DUO_BAG_COLOR` only helps if your bag is ready.** Add that config to
+  your bag ahead of time, signed in to your Apple Account, in the browser ntfy
+  opens links in (usually Safari). Otherwise the tap lands on an empty bag.
 - **The endpoint is undocumented.** Apple can change or rate-limit it without
   notice. The ⚠️ push is there so you don't miss stock silently.
 - **GitHub's terms:** Actions on GitHub-hosted runners isn't meant for
