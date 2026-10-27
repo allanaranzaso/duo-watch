@@ -57,7 +57,9 @@ LOWER_MAINLAND_STORES: dict[str, str] = {
     "R601": "Guildford Town Centre",
 }
 
-ENDPOINT = "https://www.apple.com/ca/shop/fulfillment-messages"
+# Apple retired /shop/fulfillment-messages in Oct 2026 (it now always returns
+# HTTP 541). This is what the store page itself calls now.
+ENDPOINT = "https://www.apple.com/ca/shop/retail/pickup-message"
 
 # Metrotown sits in the middle of the five stores, so a "nearby" search
 # anchored there returns all of them in one request.
@@ -70,7 +72,7 @@ HEADERS = {
     ),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-CA,en;q=0.9",
-    "Referer": "https://www.apple.com/ca/shop/buy-iphone",
+    "Referer": "https://www.apple.com/ca/shop/buy-iphone/iphone-duo",
 }
 
 UNAVAILABLE_PREFIXES = ("unavailable", "currently unavailable", "not available", "apple store pickup is currently unavailable")
@@ -143,12 +145,10 @@ class BlockedError(Exception):
 
 def build_url(parts: list[str], anchor_store: str = ANCHOR_STORE) -> str:
     params: list[tuple[str, str]] = [
-        ("fae", "true"),
         ("pl", "true"),
         ("mts.0", "regular"),
-        ("mts.1", "compact"),
-        ("searchNearby", "true"),
         ("store", anchor_store),
+        ("searchNearby", "true"),
     ]
     params += [(f"parts.{i}", p) for i, p in enumerate(parts)]
     return f"{ENDPOINT}?{urllib.parse.urlencode(params)}"
@@ -189,10 +189,16 @@ def is_available(info: dict) -> bool:
 
 def parse_hits(payload: dict, parts: dict[str, str], watch_stores: set[str]) -> tuple[list[Hit], set[str]]:
     """Return (available hits in watched stores, store IDs seen in the response)."""
-    try:
-        stores = payload["body"]["content"]["pickupMessage"]["stores"]
-    except (KeyError, TypeError) as e:
-        raise BlockedError("unexpected JSON shape (no pickupMessage.stores)") from e
+    body = payload.get("body") if isinstance(payload, dict) else None
+    if not isinstance(body, dict):
+        raise BlockedError("unexpected JSON shape (no body)")
+    if isinstance(body.get("stores"), list):           # current pickup-message shape
+        stores = body["stores"]
+    else:                                              # old fulfillment-messages shape
+        try:
+            stores = body["content"]["pickupMessage"]["stores"]
+        except (KeyError, TypeError) as e:
+            raise BlockedError("unexpected JSON shape (no stores list)") from e
 
     hits: list[Hit] = []
     seen: set[str] = set()

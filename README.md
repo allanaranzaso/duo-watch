@@ -20,7 +20,7 @@ availability" button on apple.com/ca uses. One request covers all five stores.
 GitHub Actions (cron every 2h)  →  duo_watch.py loops ~5h45m
         │                                │ every ~75s
         │                                ▼
-        │                apple.com/ca/shop/fulfillment-messages
+        │                apple.com/ca/shop/retail/pickup-message
         │                                │ pickupDisplay == "available"?
         ▼                                ▼
  next run queued, starts         ntfy.sh  →  push on your iPhone

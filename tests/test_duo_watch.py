@@ -12,6 +12,12 @@ def store(sid, name, parts):
 
 
 def payload(*stores):
+    """Current /shop/retail/pickup-message shape (verified Oct 27 2026)."""
+    return {"body": {"stores": list(stores), "storesCount": len(stores)}}
+
+
+def old_payload(*stores):
+    """Retired /shop/fulfillment-messages shape."""
     return {"body": {"content": {"pickupMessage": {"stores": list(stores)}}}}
 
 
@@ -83,6 +89,11 @@ class ParseTests(unittest.TestCase):
         hits, _ = dw.parse_hits(p, PARTS_256, WATCH)
         self.assertEqual([h.store_id for h in hits], ["R421"])
 
+    def test_old_response_shape_still_parses(self):
+        p = old_payload(store("R280", "Pacific Centre", {"MK254VC/A": AVAIL}))
+        hits, _ = dw.parse_hits(p, PARTS_256, WATCH)
+        self.assertEqual([(h.store_id, h.part) for h in hits], [("R280", "MK254VC/A")])
+
     def test_bad_shape_raises_blocked(self):
         with self.assertRaises(dw.BlockedError):
             dw.parse_hits({"head": {"status": "503"}}, PARTS_256, WATCH)
@@ -91,7 +102,8 @@ class ParseTests(unittest.TestCase):
 class UrlTests(unittest.TestCase):
     def test_build_url(self):
         url = dw.build_url(["MK244VC/A", "MK254VC/A"])
-        self.assertTrue(url.startswith("https://www.apple.com/ca/shop/fulfillment-messages?"))
+        self.assertTrue(url.startswith("https://www.apple.com/ca/shop/retail/pickup-message?"))
+        self.assertNotIn("fulfillment-messages", url)
         self.assertIn("parts.0=MK244VC%2FA", url)
         self.assertIn("parts.1=MK254VC%2FA", url)
         self.assertIn("store=R460", url)
