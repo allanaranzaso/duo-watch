@@ -11,7 +11,7 @@ Pings your iPhone the moment an iPhone Duo in your chosen storage shows up for
 | R488 | Coquitlam Centre |
 | R601 | Guildford Town Centre (Surrey) |
 
-It checks every ~75–95 seconds and calls the same endpoint the "Check
+It checks every ~75–80 seconds and calls the same endpoint the "Check
 availability" button on apple.com/ca uses. One request covers all five stores.
 
 ## How it works
@@ -29,6 +29,12 @@ GitHub Actions (cron every 2h)  →  duo_watch.py loops ~5h45m
 
 - **One alert per restock.** You get pinged when stock first appears. If it
   sells out and comes back, you get pinged again. No spam while it sits there.
+- **Sell-out pushes.** When stock disappears you get a quiet, low-priority ⌛
+  push saying roughly how long it lasted (e.g. `~47s`). It's only accurate to
+  about one poll interval, since stock is only seen when a check runs.
+- **Run summary.** Each Actions run ends with a table of every restock it saw
+  (store, model, first seen, sold out, approx. duration) on the run's summary
+  page. Local runs skip this.
 - **It tells you when it's blind.** After 5 failed checks in a row (blocked,
   network, Apple changed the format) you get a ⚠️ push. You get a ✅ when it recovers.
 - **Stdlib only.** No dependencies. Runs on Python 3.10+ anywhere.

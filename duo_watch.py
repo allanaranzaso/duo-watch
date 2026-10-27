@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 # --------------------------------------------------------------------------- #
@@ -273,6 +273,98 @@ def alert_for(cfg: Config, hit: Hit) -> None:
     )
 
 
+def sold_out_alert(cfg: Config, r: Restock) -> None:
+    # The "hourglass" tag makes ntfy prefix the title with ⌛ itself.
+    notify(
+        cfg,
+        title=f"Sold out: {r.label} at {r.store_name}",
+        message=f"In stock {format_duration(r.duration)} ({r.window()}).\n"
+                f"Accurate to about ±{cfg.poll_seconds}s (one poll interval).",
+        priority="low",
+        tags="hourglass",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Restock tracking
+# --------------------------------------------------------------------------- #
+
+def _now() -> tuple[float, datetime]:
+    """Monotonic seconds (for durations) and UTC wall clock (for display)."""
+    return time.monotonic(), datetime.now(timezone.utc)
+
+
+@dataclass
+class Restock:
+    """One in-stock streak of a (store, part) pair, as seen by our checks.
+
+    Times are when a check *noticed* the change, so each end lags the real
+    event by up to one poll interval and the duration is approximate.
+    """
+    store_id: str
+    store_name: str
+    part: str
+    label: str
+    first_mono: float
+    first_utc: datetime
+    sold_mono: float | None = None
+    sold_utc: datetime | None = None
+
+    @property
+    def duration(self) -> float:
+        return (self.sold_mono or 0.0) - self.first_mono
+
+    def window(self) -> str:
+        end = f"{self.sold_utc:%H:%M:%S}" if self.sold_utc else "now"
+        return f"in stock {self.first_utc:%H:%M:%S}–{end} UTC"
+
+
+@dataclass
+class RestockTracker:
+    # (store_id, part) -> streak that's in stock right now. A pair drops out
+    # when it sells out, so if it comes back later you get a fresh alert.
+    open: dict[tuple[str, str], Restock] = field(default_factory=dict)
+    # Every streak seen this run (open and closed), for the run summary.
+    history: list[Restock] = field(default_factory=list)
+
+
+def format_duration(seconds: float) -> str:
+    s = max(0, round(seconds))
+    if s < 60:
+        return f"~{s}s"
+    if s < 3600:
+        return f"~{s // 60}m {s % 60:02d}s"
+    return f"~{s // 3600}h {s % 3600 // 60:02d}m"
+
+
+def write_step_summary(cfg: Config, tracker: RestockTracker) -> None:
+    """Append a markdown table of this run's restocks to the Actions job summary."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    lines = ["### duo-watch run summary", ""]
+    if not tracker.history:
+        lines.append("No restocks this run.")
+    else:
+        now_mono, _ = _now()
+        lines += [
+            "| Store | Model | First seen (UTC) | Sold out (UTC) | Approx. duration |",
+            "|---|---|---|---|---|",
+        ]
+        for r in tracker.history:
+            if r.sold_utc is None:
+                sold, dur = "still in stock", f"> {format_duration(now_mono - r.first_mono)}"
+            else:
+                sold, dur = f"{r.sold_utc:%Y-%m-%d %H:%M:%S}", format_duration(r.duration)
+            lines.append(f"| {r.store_name} | {r.label} | {r.first_utc:%Y-%m-%d %H:%M:%S} | {sold} | {dur} |")
+        lines += ["", f"_Durations are accurate to about one poll interval (~{cfg.poll_seconds}s)._"]
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n\n")
+    except OSError as e:  # a summary problem should never kill the watcher
+        log(f"couldn't write step summary: {e}")
+
+
 # --------------------------------------------------------------------------- #
 # Main loop
 # --------------------------------------------------------------------------- #
@@ -281,23 +373,34 @@ def log(msg: str) -> None:
     print(f"[{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}Z] {msg}", flush=True)
 
 
-def check_once(cfg: Config, already_alerted: set[tuple[str, str]]) -> list[Hit]:
+def check_once(cfg: Config, tracker: RestockTracker) -> list[Hit]:
     payload = fetch_availability(list(cfg.parts))
     hits, seen = parse_hits(payload, cfg.parts, cfg.watch_stores)
     missing = cfg.watch_stores - seen
     if missing:
         log(f"note: response didn't include {', '.join(sorted(missing))}")
 
+    mono, utc = _now()
     current = {(h.store_id, h.part) for h in hits}
-    new_hits = [h for h in hits if (h.store_id, h.part) not in already_alerted]
+
+    # Sold out = the store reported back and the pair isn't available any more.
+    # A store missing from the response tells us nothing, so its pairs stay open.
+    for key in sorted(tracker.open):
+        if key in current or key[0] not in seen:
+            continue
+        r = tracker.open.pop(key)
+        r.sold_mono, r.sold_utc = mono, utc
+        log(f"SOLD OUT: {r.label} @ {r.store_name} after {format_duration(r.duration)} ({r.window()})")
+        sold_out_alert(cfg, r)
+
+    new_hits = [h for h in hits if (h.store_id, h.part) not in tracker.open]
     for h in new_hits:
         log(f"IN STOCK: {cfg.parts[h.part]} @ {h.store_name} ({h.quote})")
         alert_for(cfg, h)
+        r = Restock(h.store_id, h.store_name, h.part, cfg.parts[h.part], mono, utc)
+        tracker.open[(h.store_id, h.part)] = r
+        tracker.history.append(r)
 
-    # Track only what's in stock right now: anything that sells out drops off,
-    # so if it comes back later you get a fresh alert.
-    already_alerted.clear()
-    already_alerted.update(current)
     if not hits:
         log(f"no stock ({len(seen & cfg.watch_stores)}/{len(cfg.watch_stores)} watched stores reported)")
     return new_hits
@@ -308,18 +411,18 @@ def run(cfg: Config) -> None:
     log(f"stores: {', '.join(LOWER_MAINLAND_STORES.get(s, s) for s in sorted(cfg.watch_stores))}")
     deadline = time.monotonic() + cfg.run_minutes * 60 if cfg.run_minutes > 0 else None
 
-    alerted: set[tuple[str, str]] = set()
+    tracker = RestockTracker()
     failures = 0
     warned_blocked = False
 
     while deadline is None or time.monotonic() < deadline:
         try:
-            check_once(cfg, alerted)
+            check_once(cfg, tracker)
             if warned_blocked:
                 notify(cfg, "✅ Duo watcher recovered", "Apple is answering again; checks resumed.",
                        priority="default", tags="white_check_mark")
             failures, warned_blocked = 0, False
-            sleep_for = cfg.poll_seconds + random.uniform(0, 20)
+            sleep_for = cfg.poll_seconds + random.uniform(0, 5)
         except BlockedError as e:
             failures += 1
             log(f"check failed ({failures} in a row): {e}")
@@ -335,6 +438,7 @@ def run(cfg: Config) -> None:
             sleep_for = min(sleep_for, max(0, deadline - time.monotonic()))
         time.sleep(sleep_for)
 
+    write_step_summary(cfg, tracker)
     log("run window finished, exiting")
 
 
@@ -354,7 +458,7 @@ def main() -> None:
 
     if args.once:
         try:
-            hits = check_once(cfg, set())
+            hits = check_once(cfg, RestockTracker())
         except BlockedError as e:
             sys.exit(f"check failed: {e}")
         if not hits:
