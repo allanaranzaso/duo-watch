@@ -113,6 +113,11 @@ Apple sometimes blocks datacenter IP addresses. If `--once` fails on Actions
 but works on your laptop, that's the cause. Run it from home instead (any
 always-on machine). The script doesn't change.
 
+`check failed: HTTP 541 (rate-limited)` (or 429/403/503) means Apple thinks
+you're polling too often. The watcher backs off on its own (5, 10, 20, then 30
+minutes between tries) and resumes normal polling once Apple answers. Polling
+every 30s for hours tends to trigger it; a `POLL_SECONDS` of 60 or more is safer.
+
 ## Tests
 
 ```bash

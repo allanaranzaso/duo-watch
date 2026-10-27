@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
@@ -348,6 +349,57 @@ class RunLoopTests(unittest.TestCase):
         self.assertEqual(priorities, ["urgent", "low", "urgent"])  # in, sold out, in again
         self.assertIn("| Metrotown | iPhone Duo 256GB Star White | 2026-10-27 14:02:11 | 2026-10-27 14:03:26 | ~1m 15s |", out)
         self.assertIn("still in stock", out)
+
+
+class RateLimitTests(unittest.TestCase):
+    """Rate-limit responses get a long cooldown; other failures keep the short backoff."""
+
+    def http_error(self, code):
+        return urllib.error.HTTPError(dw.ENDPOINT, code, "error", {}, None)
+
+    def test_541_is_rate_limited(self):
+        with mock.patch.object(dw.urllib.request, "urlopen", side_effect=self.http_error(541)), \
+             self.assertRaises(dw.BlockedError) as cm:
+            dw.fetch_availability(["MK244VC/A"])
+        self.assertTrue(cm.exception.rate_limited)
+        self.assertEqual(str(cm.exception), "HTTP 541")
+
+    def test_500_is_not_rate_limited(self):
+        with mock.patch.object(dw.urllib.request, "urlopen", side_effect=self.http_error(500)), \
+             self.assertRaises(dw.BlockedError) as cm:
+            dw.fetch_availability(["MK244VC/A"])
+        self.assertFalse(cm.exception.rate_limited)
+
+    def sleeps_for(self, results, run_minutes):
+        """Run the loop on a fake clock and return each sleep it asked for."""
+        cfg = make_config()
+        cfg.run_minutes = run_minutes
+        clock = FakeClock()
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock.sleep(seconds)
+
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(dw, "fetch_availability", side_effect=results), \
+             mock.patch.object(dw, "notify"), \
+             mock.patch.object(dw.random, "uniform", return_value=0), \
+             mock.patch.object(dw.time, "monotonic", clock.monotonic), \
+             mock.patch.object(dw.time, "sleep", sleep), \
+             mock.patch.object(dw, "_now", clock.now):
+            dw.run(cfg)
+        return sleeps
+
+    def test_rate_limit_cools_down_then_resumes_polling(self):
+        blocked = dw.BlockedError("HTTP 541", rate_limited=True)
+        sleeps = self.sleeps_for([blocked, blocked] + [OUT] * 5, run_minutes=17)
+        # 5 min, 10 min, then back to the normal 75s poll until the 1020s deadline.
+        self.assertEqual(sleeps, [300, 600, 75, 45])
+
+    def test_other_errors_keep_short_backoff(self):
+        sleeps = self.sleeps_for([dw.BlockedError("network error")] + [OUT] * 5, run_minutes=4)
+        self.assertEqual(sleeps, [150, 75, 15])  # poll_seconds * 2, then normal polling
 
 
 if __name__ == "__main__":
