@@ -1,6 +1,8 @@
 import os
 import sys
+import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -27,6 +29,31 @@ INELIGIBLE = {"pickupDisplay": "ineligible", "pickupSearchQuote": "Not available
 
 PARTS_256 = {"MK244VC/A": "iPhone Duo 256GB Star White", "MK254VC/A": "iPhone Duo 256GB Night Sky"}
 WATCH = set(dw.LOWER_MAINLAND_STORES)
+
+IN = payload(store("R460", "Metrotown", {"MK244VC/A": AVAIL}))
+OUT = payload(store("R460", "Metrotown", {"MK244VC/A": UNAVAIL}))
+BASE_UTC = datetime(2026, 10, 27, 14, 2, 11, tzinfo=timezone.utc)
+
+
+def make_config():
+    with mock.patch.dict(os.environ, {"NTFY_TOPIC": "t", "DUO_STORAGE": "256GB"}, clear=True):
+        return dw.Config.from_env()
+
+
+class FakeClock:
+    """Stands in for both clocks: monotonic seconds t, and UTC = BASE_UTC + t."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def monotonic(self):
+        return self.t
+
+    def now(self):
+        return self.t, BASE_UTC + timedelta(seconds=self.t)
+
+    def sleep(self, seconds):
+        self.t += seconds
 
 
 class ConfigTests(unittest.TestCase):
@@ -114,23 +141,170 @@ class DedupeTests(unittest.TestCase):
     """Alert once per in-stock streak; alert again if it sells out and comes back."""
 
     def setUp(self):
-        with mock.patch.dict(os.environ, {"NTFY_TOPIC": "t", "DUO_STORAGE": "256GB"}, clear=True):
-            self.cfg = dw.Config.from_env()
+        self.cfg = make_config()
 
     def run_sequence(self, payloads):
         sent = []
-        alerted = set()
+        tracker = dw.RestockTracker()
         with mock.patch.object(dw, "fetch_availability", side_effect=payloads), \
-             mock.patch.object(dw, "alert_for", side_effect=lambda cfg, h: sent.append(h.store_id)):
+             mock.patch.object(dw, "alert_for", side_effect=lambda cfg, h: sent.append(h.store_id)), \
+             mock.patch.object(dw, "sold_out_alert"), \
+             mock.patch.object(dw, "_now", FakeClock().now):
             for _ in payloads:
-                dw.check_once(self.cfg, alerted)
+                dw.check_once(self.cfg, tracker)
         return sent
 
     def test_sequence(self):
-        in_stock = payload(store("R460", "Metrotown", {"MK244VC/A": AVAIL}))
-        out = payload(store("R460", "Metrotown", {"MK244VC/A": UNAVAIL}))
-        sent = self.run_sequence([out, in_stock, in_stock, in_stock, out, in_stock])
+        sent = self.run_sequence([OUT, IN, IN, IN, OUT, IN])
         self.assertEqual(sent, ["R460", "R460"])  # first appearance + restock only
+
+
+class SellOutTests(unittest.TestCase):
+    """Notice when an in-stock pair disappears, and how long it lasted."""
+
+    STEP = 77  # seconds between checks
+
+    def setUp(self):
+        self.cfg = make_config()
+
+    def run_sequence(self, results):
+        """results: payloads, or exceptions for fetch_availability to raise."""
+        clock = FakeClock()
+        tracker = dw.RestockTracker()
+        sold = []
+        with mock.patch.object(dw, "fetch_availability", side_effect=results), \
+             mock.patch.object(dw, "alert_for"), \
+             mock.patch.object(dw, "sold_out_alert", side_effect=lambda cfg, r: sold.append(r)), \
+             mock.patch.object(dw, "_now", clock.now):
+            for _ in results:
+                try:
+                    dw.check_once(self.cfg, tracker)
+                except dw.BlockedError:
+                    pass
+                clock.sleep(self.STEP)
+        return tracker, sold
+
+    def test_sell_out_records_times_and_duration(self):
+        tracker, sold = self.run_sequence([IN, IN, OUT])
+        self.assertEqual(len(sold), 1)
+        r = sold[0]
+        self.assertEqual((r.store_id, r.part, r.label), ("R460", "MK244VC/A", "iPhone Duo 256GB Star White"))
+        self.assertEqual(r.duration, 2 * self.STEP)
+        self.assertEqual(r.first_utc, BASE_UTC)
+        self.assertEqual(r.sold_utc, BASE_UTC + timedelta(seconds=2 * self.STEP))
+        self.assertEqual(tracker.open, {})
+        self.assertEqual(tracker.history, [r])
+
+    def test_each_restock_is_tracked_separately(self):
+        tracker, sold = self.run_sequence([IN, OUT, IN, OUT])
+        self.assertEqual(len(tracker.history), 2)
+        self.assertEqual(sold, tracker.history)
+        self.assertEqual([r.duration for r in sold], [self.STEP, self.STEP])
+        self.assertEqual(sold[1].first_utc, BASE_UTC + timedelta(seconds=2 * self.STEP))
+
+    def test_failed_check_is_not_a_sell_out(self):
+        tracker, sold = self.run_sequence([IN, dw.BlockedError("HTTP 503"), OUT])
+        self.assertEqual(len(sold), 1)
+        self.assertEqual(sold[0].duration, 2 * self.STEP)  # spans the failed check
+
+    def test_store_missing_from_response_stays_open(self):
+        other_store_only = payload(store("R280", "Pacific Centre", {"MK244VC/A": UNAVAIL}))
+        tracker, sold = self.run_sequence([IN, other_store_only])
+        self.assertEqual(sold, [])
+        self.assertIn(("R460", "MK244VC/A"), tracker.open)
+
+    def test_format_duration(self):
+        self.assertEqual(dw.format_duration(47), "~47s")
+        self.assertEqual(dw.format_duration(192), "~3m 12s")
+        self.assertEqual(dw.format_duration(3900), "~1h 05m")
+
+    def test_sold_out_push_is_low_priority_without_click(self):
+        r = dw.Restock("R460", "Metrotown", "MK244VC/A", "iPhone Duo 256GB Star White",
+                       0.0, BASE_UTC, 47.0, BASE_UTC + timedelta(seconds=47))
+        with mock.patch.object(dw, "notify") as notify:
+            dw.sold_out_alert(self.cfg, r)
+        _, kwargs = notify.call_args
+        self.assertEqual(kwargs["priority"], "low")
+        self.assertEqual(kwargs["tags"], "hourglass")
+        self.assertIsNone(kwargs.get("click"))
+        self.assertIn("Metrotown", kwargs["title"])
+        self.assertIn("~47s", kwargs["message"])
+        self.assertIn("14:02:11–14:02:58 UTC", kwargs["message"])
+
+
+class StepSummaryTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = make_config()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = os.path.join(tmp.name, "summary.md")
+
+    def write(self, tracker, env=None, now_t=600.0):
+        clock = FakeClock()
+        clock.t = now_t
+        env = {"GITHUB_STEP_SUMMARY": self.path} if env is None else env
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(dw, "_now", clock.now):
+            dw.write_step_summary(self.cfg, tracker)
+
+    def read(self):
+        with open(self.path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_table_with_closed_and_open_restocks(self):
+        tracker = dw.RestockTracker(history=[
+            dw.Restock("R460", "Metrotown", "MK244VC/A", "iPhone Duo 256GB Star White",
+                       0.0, BASE_UTC, 47.0, BASE_UTC + timedelta(seconds=47)),
+            dw.Restock("R280", "Pacific Centre", "MK254VC/A", "iPhone Duo 256GB Night Sky",
+                       300.0, BASE_UTC + timedelta(seconds=300)),
+        ])
+        self.write(tracker)
+        out = self.read()
+        self.assertIn("| Store | Model | First seen (UTC) | Sold out (UTC) | Approx. duration |", out)
+        self.assertIn("| Metrotown | iPhone Duo 256GB Star White | 2026-10-27 14:02:11 | 2026-10-27 14:02:58 | ~47s |", out)
+        self.assertIn("| Pacific Centre | iPhone Duo 256GB Night Sky | 2026-10-27 14:07:11 | still in stock | > ~5m 00s |", out)
+
+    def test_no_restocks(self):
+        self.write(dw.RestockTracker())
+        self.assertIn("No restocks this run.", self.read())
+        self.assertNotIn("| Store |", self.read())
+
+    def test_skipped_without_env_var(self):
+        self.write(dw.RestockTracker(), env={})
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_appends_to_existing_summary(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("earlier step\n")
+        self.write(dw.RestockTracker())
+        out = self.read()
+        self.assertTrue(out.startswith("earlier step\n"))
+        self.assertIn("No restocks this run.", out)
+
+
+class RunLoopTests(unittest.TestCase):
+    def test_run_writes_summary_at_deadline(self):
+        cfg = make_config()
+        cfg.run_minutes = 3  # 180s window at 75s polls: checks at t=0, 75, 150
+        clock = FakeClock()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "summary.md")
+            with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": path}), \
+                 mock.patch.object(dw, "fetch_availability", side_effect=[IN, OUT, IN]), \
+                 mock.patch.object(dw, "notify") as notify, \
+                 mock.patch.object(dw.random, "uniform", return_value=0) as uniform, \
+                 mock.patch.object(dw.time, "monotonic", clock.monotonic), \
+                 mock.patch.object(dw.time, "sleep", clock.sleep), \
+                 mock.patch.object(dw, "_now", clock.now):
+                dw.run(cfg)
+            with open(path, encoding="utf-8") as f:
+                out = f.read()
+
+        uniform.assert_called_with(0, 5)
+        self.assertEqual(clock.t, 180)
+        priorities = [c.kwargs.get("priority", "urgent") for c in notify.call_args_list]
+        self.assertEqual(priorities, ["urgent", "low", "urgent"])  # in, sold out, in again
+        self.assertIn("| Metrotown | iPhone Duo 256GB Star White | 2026-10-27 14:02:11 | 2026-10-27 14:03:26 | ~1m 15s |", out)
+        self.assertIn("still in stock", out)
 
 
 if __name__ == "__main__":
