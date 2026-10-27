@@ -63,6 +63,10 @@ LOWER_MAINLAND_STORES: dict[str, str] = {
 # HTTP 541). This is what the store page itself calls now.
 ENDPOINT = "https://www.apple.com/ca/shop/retail/pickup-message"
 
+# Responses that mean "you're asking too often". 541 is Apple's own: the
+# pickup-message endpoint starts returning it after hours of fast polling.
+RATE_LIMIT_CODES = {403, 429, 503, 541}
+
 # Metrotown sits in the middle of the five stores, so a "nearby" search
 # anchored there returns all of them in one request.
 ANCHOR_STORE = "R460"
@@ -152,6 +156,10 @@ def _norm_storage(s: str) -> str:
 class BlockedError(Exception):
     """Apple returned something other than usable JSON (rate limit / bot block)."""
 
+    def __init__(self, msg: str, rate_limited: bool = False):
+        super().__init__(msg)
+        self.rate_limited = rate_limited
+
 
 def build_url(parts: list[str], anchor_store: str = ANCHOR_STORE) -> str:
     params: list[tuple[str, str]] = [
@@ -170,7 +178,7 @@ def fetch_availability(parts: list[str], timeout: int = 20) -> dict:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
-        raise BlockedError(f"HTTP {e.code}") from e
+        raise BlockedError(f"HTTP {e.code}", rate_limited=e.code in RATE_LIMIT_CODES) from e
     except (urllib.error.URLError, TimeoutError) as e:
         raise BlockedError(f"network error: {e}") from e
     try:
@@ -445,14 +453,20 @@ def run(cfg: Config) -> None:
             sleep_for = cfg.poll_seconds + random.uniform(0, 5)
         except BlockedError as e:
             failures += 1
-            log(f"check failed ({failures} in a row): {e}")
+            if e.rate_limited:
+                # Poking Apple while it's rate-limiting us only stretches the
+                # block, so cool down 5, 10, 20, then 30 minutes.
+                sleep_for = min(1800, 300 * 2 ** (failures - 1)) + random.uniform(0, 60)
+            else:
+                # Back off: 2, 4, 8 ... up to 10 minutes.
+                sleep_for = min(600, cfg.poll_seconds * 2 ** min(failures, 3)) + random.uniform(0, 30)
+            why = " (rate-limited)" if e.rate_limited else ""
+            log(f"check failed ({failures} in a row): {e}{why}; retrying in {format_duration(sleep_for)}")
             if failures == 5 and not warned_blocked:
                 notify(cfg, "⚠️ Duo watcher can't reach Apple",
                        f"Last error: {e}. Checks will keep retrying, but you may be missing stock.",
                        priority="high", tags="warning")
                 warned_blocked = True
-            # Back off: 2, 4, 8 ... up to 10 minutes.
-            sleep_for = min(600, cfg.poll_seconds * 2 ** min(failures, 3)) + random.uniform(0, 30)
 
         if deadline is not None:
             sleep_for = min(sleep_for, max(0, deadline - time.monotonic()))
