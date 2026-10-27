@@ -1,0 +1,43 @@
+name: iPhone Duo stock watch
+
+on:
+  # Kick off a fresh watcher every 2 hours. Each run loops for ~5h45m, and the
+  # concurrency group below queues the next run until the current one ends,
+  # so there's (almost) always exactly one watcher running.
+  schedule:
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to run"
+        type: choice
+        default: watch
+        options: [watch, once, test-notify]
+
+concurrency:
+  group: duo-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355   # GitHub-hosted jobs are capped at 6h
+    env:
+      DUO_STORAGE: ${{ vars.DUO_STORAGE }}
+      DUO_COLORS: ${{ vars.DUO_COLORS }}
+      WATCH_STORES: ${{ vars.WATCH_STORES }}
+      POLL_SECONDS: ${{ vars.POLL_SECONDS || '75' }}
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      RUN_MINUTES: "345"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run watcher
+        run: |
+          case "${{ inputs.mode || 'watch' }}" in
+            once)        python duo_watch.py --once ;;
+            test-notify) python duo_watch.py --test-notify ;;
+            *)           python duo_watch.py ;;
+          esac
