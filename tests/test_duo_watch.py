@@ -87,49 +87,6 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(dw.Config.from_env().poll_seconds, 30)
 
 
-class BagUrlTests(unittest.TestCase):
-    """Alerts for DUO_BAG_COLOR open the bag; everything else opens the product page."""
-
-    def env(self, **kw):
-        base = {"NTFY_TOPIC": "t", "DUO_STORAGE": "256GB"}
-        base.update(kw)
-        return mock.patch.dict(os.environ, base, clear=True)
-
-    def click_for(self, cfg, part):
-        with mock.patch.object(dw, "notify") as notify:
-            dw.alert_for(cfg, dw.Hit("R460", "Metrotown", part, "Available Today"))
-        return notify.call_args.kwargs["click"]
-
-    def test_matching_colour_opens_bag(self):
-        with self.env(DUO_BAG_COLOR="night sky"):
-            cfg = dw.Config.from_env()
-        self.assertEqual(cfg.bag_color, "Night Sky")
-        self.assertEqual(self.click_for(cfg, "MK254VC/A"), dw.BAG_URL)
-
-    def test_other_colour_opens_product_page(self):
-        with self.env(DUO_BAG_COLOR="Night Sky"):
-            cfg = dw.Config.from_env()
-        self.assertEqual(self.click_for(cfg, "MK244VC/A"), dw.product_url("MK244VC/A"))
-
-    def test_unset_opens_product_page_for_both(self):
-        with self.env():
-            cfg = dw.Config.from_env()
-        self.assertIsNone(cfg.bag_color)
-        for part in ("MK244VC/A", "MK254VC/A"):
-            self.assertEqual(self.click_for(cfg, part), dw.product_url(part))
-
-    def test_bag_colour_not_watched_exits(self):
-        with self.env(DUO_COLORS="Star White", DUO_BAG_COLOR="Night Sky"), \
-             self.assertRaises(SystemExit) as cm:
-            dw.Config.from_env()
-        self.assertIn("DUO_BAG_COLOR", str(cm.exception.code))
-
-    def test_unknown_bag_colour_exits(self):
-        with self.env(DUO_BAG_COLOR="Gold"), self.assertRaises(SystemExit) as cm:
-            dw.Config.from_env()
-        self.assertIn("DUO_BAG_COLOR", str(cm.exception.code))
-
-
 class ParseTests(unittest.TestCase):
     def test_available_in_watched_store(self):
         p = payload(

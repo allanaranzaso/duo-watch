@@ -25,7 +25,6 @@ jobs:
     env:
       DUO_STORAGE: ${{ vars.DUO_STORAGE }}
       DUO_COLORS: ${{ vars.DUO_COLORS }}
-      DUO_BAG_COLOR: ${{ vars.DUO_BAG_COLOR }}
       WATCH_STORES: ${{ vars.WATCH_STORES }}
       POLL_SECONDS: ${{ vars.POLL_SECONDS || '75' }}
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
