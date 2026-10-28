@@ -9,7 +9,6 @@ GitHub Actions, your Mac, a Raspberry Pi, a VPS.
 Config is all environment variables (see README.md):
   DUO_STORAGE    required  e.g. "256GB" or "512GB,1TB"
   DUO_COLORS     optional  "Star White,Night Sky" (default: both)
-  DUO_BAG_COLOR  optional  "Star White" or "Night Sky": alerts for it open your bag
   NTFY_TOPIC     required  your secret ntfy topic name
   NTFY_SERVER    optional  default https://ntfy.sh
   WATCH_STORES   optional  comma list of store IDs (default: all 5 Lower Mainland stores)
@@ -48,7 +47,6 @@ PARTS: dict[tuple[str, str], str] = {
     ("1TB", "Night Sky"): "MK294VC/A",
     ("2TB", "Night Sky"): "MK2C4VC/A",
 }
-PART_COLORS: dict[str, str] = {part: color for (_, color), part in PARTS.items()}
 
 # Apple's own store list (apple.com/autopush/ca/retail/storelist/stores.xml).
 LOWER_MAINLAND_STORES: dict[str, str] = {
@@ -96,7 +94,6 @@ class Config:
     ntfy_topic: str
     poll_seconds: int
     run_minutes: int
-    bag_color: str | None = None   # alerts for this colour open the bag
 
     @classmethod
     def from_env(cls, require_topic: bool = True) -> "Config":
@@ -113,12 +110,6 @@ class Config:
         bad = colors - {"Star White", "Night Sky"}
         if bad:
             sys.exit(f"Unknown DUO_COLORS value(s): {', '.join(sorted(bad))}")
-
-        bag_color = os.environ.get("DUO_BAG_COLOR", "").strip().title() or None
-        if bag_color and bag_color not in {"Star White", "Night Sky"}:
-            sys.exit(f"Unknown DUO_BAG_COLOR value: {bag_color}")
-        if bag_color and bag_color not in colors:
-            sys.exit(f"DUO_BAG_COLOR is {bag_color}, but DUO_COLORS only watches {', '.join(sorted(colors))}")
 
         parts = {
             part: f"iPhone Duo {storage} {color}"
@@ -140,7 +131,6 @@ class Config:
             ntfy_topic=topic,
             poll_seconds=max(30, int(os.environ.get("POLL_SECONDS", "75"))),
             run_minutes=int(os.environ.get("RUN_MINUTES", "0")),
-            bag_color=bag_color,
         )
 
 
@@ -249,18 +239,8 @@ def _strip_html(s: str) -> str:
 # Notifications
 # --------------------------------------------------------------------------- #
 
-BAG_URL = "https://www.apple.com/ca/shop/bag"
-
-
 def product_url(part: str) -> str:
     return f"https://www.apple.com/ca/shop/product/{part}"
-
-
-def click_url(cfg: Config, part: str) -> str:
-    """The bag for the colour you've pre-loaded there, the product page otherwise."""
-    if cfg.bag_color and PART_COLORS.get(part) == cfg.bag_color:
-        return BAG_URL
-    return product_url(part)
 
 
 PRIORITY = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5}
@@ -297,7 +277,7 @@ def alert_for(cfg: Config, hit: Hit) -> None:
         cfg,
         title=f"🚨 {label} at {hit.store_name}",
         message=f"{hit.quote}\nTap to open the Apple Store page and reserve pickup.",
-        click=click_url(cfg, hit.part),
+        click=product_url(hit.part),
     )
 
 
